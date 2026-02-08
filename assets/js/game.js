@@ -3,9 +3,11 @@
 const POLLING_INTERVAL = 2000; // 2秒轮询一次
 let mySeat = 0; // 1 或 2
 let lastGameState = null;
+let eventDefinitions = []; // 存储事件定义
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
+    loadEventDefinitions();
     fetchState();
     setInterval(fetchState, POLLING_INTERVAL);
 });
@@ -26,10 +28,18 @@ async function fetchState() {
     }
 }
 
+async function loadEventDefinitions() {
+    try {
+        const res = await fetch('assets/data/events.json');
+        eventDefinitions = await res.json();
+    } catch (e) {
+        console.error("Failed to load events:", e);
+    }
+}
+
 function updateUI(game) {
     // 避免重复渲染 (简单优化)
     // if (JSON.stringify(game) === JSON.stringify(lastGameState)) return;
-    lastGameState = game;
 
     // 1. 确定敌我数据前缀
     const myPrefix = (mySeat === 1) ? 'p1' : 'p2';
@@ -54,8 +64,16 @@ function updateUI(game) {
     document.getElementById('phase-indicator').innerText = 
         `回合 ${game.turn} - ${phases[game.phase] || '未知'} (${timeLeft}s)`;
 
+    // 更新随机事件区域显示
+    const eventDisplay = document.getElementById('event-display');
+    if (eventDisplay) {
+        const curEvent = eventDefinitions.find(e => e.id === game.event_id);
+        eventDisplay.innerText = curEvent ? `【${curEvent.name}】${curEvent.desc}` : '随机事件区域';
+    }
+
     // 5. 处理阶段通知弹窗 (Phase Change Detection)
-    if (lastGameState && lastGameState.phase !== game.phase) {
+    // 如果是首次加载(!lastGameState) 或者 阶段发生了变化
+    if (!lastGameState || lastGameState.phase !== game.phase) {
         showAnnouncement(game);
     }
 
@@ -89,6 +107,9 @@ function updateUI(game) {
     // 8. 渲染置牌区 (Slot)
     renderSlots('player-slots', game[myPrefix + '_slot_cards']);
     renderSlots('enemy-slots', game[enemyPrefix + '_slot_cards']);
+
+    // 更新本地状态记录
+    lastGameState = game;
 }
 
 function renderSlots(containerId, slotData) {
@@ -118,7 +139,13 @@ function showAnnouncement(game) {
     const secondPlayer = isP1First ? (game.p2_name || 'P2') : (game.p1_name || 'P1');
 
     switch(game.phase) {
-        case 0: msg = `第 ${game.turn} 回合\n随机事件阶段`; break;
+        case 0: 
+            // 查找当前事件
+            const event = eventDefinitions.find(e => e.id === game.event_id);
+            const eventName = event ? event.name : '未知事件';
+            const eventDesc = event ? event.desc : '...';
+            msg = `第 ${game.turn} 回合\n【${eventName}】\n${eventDesc}`; 
+            break;
         case 1: msg = `抽卡阶段\n${firstPlayer}`; break;
         case 2: msg = `抽卡阶段\n${secondPlayer}`; break;
         case 3: msg = `部署阶段`; break;

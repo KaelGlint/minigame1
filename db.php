@@ -148,11 +148,13 @@ class GameModel {
         $game = $this->getGame($tableId);
         // 如果双方都在，且游戏未开始
         if (!empty($game['p1_name']) && !empty($game['p2_name']) && $game['game_status'] == 0) {
+            $eventId = $this->getRandomEventId();
             $this->saveGame($tableId, [
                 'game_status' => 1,      // 进行中
                 'phase' => 0,            // 阶段 0: 随机事件
                 'turn' => 1,
-                'deadline_ts' => time() + 3 // 初始进入 Turn Start Popup (3s)
+                'event_id' => $eventId,
+                'deadline_ts' => time() + 5 // 统一为 5秒 (含弹窗)
             ]);
         }
     }
@@ -263,6 +265,8 @@ class GameModel {
                     $nextPhase = 0;
                     $nextDeadline = $now + 5;
                     $nextTurn++; // 回合数 +1
+                    // 新回合生成新事件
+                    $updateData['event_id'] = $this->getRandomEventId();
                     break;
             }
 
@@ -321,6 +325,17 @@ class GameModel {
         if ($this->use_apcu) {
             apcu_delete("game_" . $tableId);
         }
+    }
+
+    // 随机获取一个事件ID
+    private function getRandomEventId() {
+        // 为了极致性能，这里不每次都读文件，而是硬编码范围
+        // 如果事件列表变动频繁，可以改为读取 events.json
+        // $events = json_decode(file_get_contents(__DIR__ . '/assets/data/events.json'), true);
+        // return $events[array_rand($events)]['id'];
+        
+        // 目前有 4 个事件
+        return rand(1, 4);
     }
 }
 ?>

@@ -123,7 +123,7 @@ if (!isset($_SESSION['table_id'])) {
         <div id="announcement-text">回合 1</div>
     </div>
 
-    <script src="game.js"></script>
+    <script src="assets/js/game.js"></script>
     <script>
         async function quitGame() {
             if (!confirm("确定要退出并结束本局游戏吗？")) return;
