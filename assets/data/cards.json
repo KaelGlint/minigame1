@@ -1,0 +1,9 @@
+[
+    {"id": 999, "name": "指挥部", "type": "building", "hp": 50, "cost": 0, "skill": 0, "img": "base.png", "desc": "核心建筑，被摧毁则失败"},
+    {"id": 1, "name": "重装步兵", "type": "hero", "hp": 30, "cost": 5, "skill": 1, "img": "hero_tank.png", "desc": "坚固的前排英雄"},
+    {"id": 2, "name": "神射手", "type": "hero", "hp": 15, "cost": 5, "skill": 2, "img": "hero_archer.png", "desc": "远程高伤英雄"},
+    {"id": 11, "name": "防御塔", "type": "building", "hp": 40, "cost": 3, "skill": 0, "img": "tower.png", "desc": "基础防御建筑"},
+    {"id": 31, "name": "补给站", "type": "resource", "hp": 10, "cost": 2, "skill": 0, "img": "supply.png", "desc": "每回合提供额外金币"},
+    {"id": 51, "name": "民兵", "type": "npc", "hp": 10, "cost": 1, "skill": 0, "img": "militia.png", "desc": "廉价的炮灰"},
+    {"id": 52, "name": "雇佣兵", "type": "npc", "hp": 15, "cost": 2, "skill": 0, "img": "merc.png", "desc": "稍微强一点的炮灰"}
+]

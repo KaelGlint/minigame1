@@ -4,10 +4,12 @@ const POLLING_INTERVAL = 2000; // 2秒轮询一次
 let mySeat = 0; // 1 或 2
 let lastGameState = null;
 let eventDefinitions = []; // 存储事件定义
+let cardDefinitions = {};  // 存储卡牌定义 (ID -> Data)
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     loadEventDefinitions();
+    loadCardDefinitions();
     fetchState();
     setInterval(fetchState, POLLING_INTERVAL);
 });
@@ -34,6 +36,19 @@ async function loadEventDefinitions() {
         eventDefinitions = await res.json();
     } catch (e) {
         console.error("Failed to load events:", e);
+    }
+}
+
+async function loadCardDefinitions() {
+    try {
+        const res = await fetch('assets/data/cards.json');
+        const cards = await res.json();
+        // 转为对象方便查找
+        cards.forEach(c => {
+            cardDefinitions[c.id] = c;
+        });
+    } catch (e) {
+        console.error("Failed to load cards:", e);
     }
 }
 
@@ -79,14 +94,12 @@ function updateUI(game) {
 
     // 6. 处理抽卡弹窗 (Phase 1 & 2)
     const draftModal = document.getElementById('draft-modal');
-    // 只有在抽卡阶段，且轮到自己时才显示选卡界面
-    // Phase 1: P1 Draft, Phase 2: P2 Draft
-    const isMyDraftTurn = (game.phase === 1 && mySeat === 1) || (game.phase === 2 && mySeat === 2);
+    const isDraftPhase = (game.phase === 1 || game.phase === 2);
     
-    if (isMyDraftTurn) {
+    if (isDraftPhase) {
         draftModal.style.display = 'flex';
         document.getElementById('draft-timer').innerText = `剩余时间: ${timeLeft}s`;
-        // TODO: 这里之后会根据服务器返回的候选卡牌渲染内容
+        renderDraftCards(game);
     } else {
         draftModal.style.display = 'none';
     }
@@ -99,7 +112,8 @@ function updateUI(game) {
     myHand.forEach(cardId => {
         const cardDiv = document.createElement('div');
         cardDiv.className = 'card';
-        cardDiv.innerText = `Card ${cardId}`;
+        const cardData = cardDefinitions[cardId] || { name: '未知', id: cardId };
+        cardDiv.innerText = cardData.name;
         // TODO: 添加拖拽事件
         handContainer.appendChild(cardDiv);
     });
@@ -112,6 +126,58 @@ function updateUI(game) {
     lastGameState = game;
 }
 
+function renderDraftCards(game) {
+    const container = document.getElementById('draft-cards');
+    container.innerHTML = '';
+
+    const draftCards = game.draft_cards || [];
+    const myPicks = game.draft_picks[mySeat === 1 ? 'p1' : 'p2'] || [];
+    const enemyPicks = game.draft_picks[mySeat === 1 ? 'p2' : 'p1'] || [];
+    const allPicked = [...myPicks, ...enemyPicks];
+    
+    const isP1First = (game.turn % 2 !== 0);
+    const activeSeat = (game.phase === 1) ? (isP1First ? 1 : 2) : (isP1First ? 2 : 1);
+    const isMyTurn = (mySeat === activeSeat);
+
+    draftCards.forEach((cardId, index) => {
+        const cardData = cardDefinitions[cardId] || { name: '未知', desc: '...' };
+        const div = document.createElement('div');
+        div.className = 'draft-card';
+        div.innerHTML = `
+            <div style="text-align:center">
+                <strong>${cardData.name}</strong><br>
+                <small>${cardData.type}</small><br>
+                <span style="font-size:10px">${cardData.desc}</span>
+            </div>
+        `;
+
+        // 状态处理
+        if (allPicked.includes(index)) {
+            div.style.opacity = '0.3';
+            div.style.cursor = 'not-allowed';
+            if (myPicks.includes(index)) div.style.borderColor = 'green';
+            else div.style.borderColor = 'red';
+        } else {
+            if (isMyTurn) {
+                div.onclick = () => pickCard(index);
+                div.style.cursor = 'pointer';
+            } else {
+                div.style.cursor = 'not-allowed';
+                div.style.opacity = '0.6';
+            }
+        }
+
+        container.appendChild(div);
+    });
+}
+
+async function pickCard(index) {
+    const formData = new FormData();
+    formData.append('index', index);
+    await fetch('api.php?action=draft_card', { method: 'POST', body: formData });
+    fetchState(); // 立即刷新
+}
+
 function renderSlots(containerId, slotData) {
     const container = document.getElementById(containerId);
     const slots = container.querySelectorAll('.slot');
@@ -122,7 +188,8 @@ function renderSlots(containerId, slotData) {
         if (cardId) {
             const cardDiv = document.createElement('div');
             cardDiv.className = 'card';
-            cardDiv.innerText = `Card ${cardId}`;
+            const cardData = cardDefinitions[cardId] || { name: '未知' };
+            cardDiv.innerText = cardData.name;
             slot.appendChild(cardDiv);
         }
     });

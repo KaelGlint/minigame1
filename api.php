@@ -1,5 +1,8 @@
 <?php
 // api.php
+// 禁止错误直接输出到页面，防止破坏 JSON 结构
+ini_set('display_errors', 0);
+error_reporting(E_ALL);
 session_start();
 require_once 'db.php';
 
@@ -55,6 +58,17 @@ try {
             'data' => $gameData,
             'my_seat' => $_SESSION['seat']
         ];
+    }
+    elseif ($action === 'draft_card') {
+        // 玩家选卡
+        if (!isset($_SESSION['table_id'])) throw new Exception("Not logged in");
+        $idx = (int)$_POST['index'];
+        
+        if ($gameModel->processDraftPick($_SESSION['table_id'], $_SESSION['seat'], $idx)) {
+            $response = ['status' => 'success'];
+        } else {
+            $response = ['status' => 'error', 'msg' => 'Invalid pick or not your turn'];
+        }
     }
     elseif ($action === 'debug_reset') {
         // 重置所有游戏
