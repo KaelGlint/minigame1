@@ -70,6 +70,47 @@ try {
             $response = ['status' => 'error', 'msg' => 'Invalid pick or not your turn'];
         }
     }
+    elseif ($action === 'deploy_card') {
+        // 玩家部署卡牌
+        if (!isset($_SESSION['table_id'])) throw new Exception("Not logged in");
+        
+        $handIndex = (int)$_POST['hand_index'];
+        $slotIndex = (int)$_POST['slot_index'];
+        
+        if ($gameModel->deployCard($_SESSION['table_id'], $_SESSION['seat'], $handIndex, $slotIndex)) {
+            $response = ['status' => 'success'];
+        } else {
+            $response = ['status' => 'error', 'msg' => 'Deployment failed (Invalid move or insufficient gold)'];
+        }
+    }
+    elseif ($action === 'finish_deployment') {
+        // 完成部署
+        if (!isset($_SESSION['table_id'])) throw new Exception("Not logged in");
+        if ($gameModel->setDeploymentReady($_SESSION['table_id'], $_SESSION['seat'])) {
+            $response = ['status' => 'success'];
+        } else {
+            $response = ['status' => 'error', 'msg' => 'Failed to set ready'];
+        }
+    }
+    elseif ($action === 'discard_card') {
+        // 主动弃牌
+        if (!isset($_SESSION['table_id'])) throw new Exception("Not logged in");
+        $handIndex = (int)$_POST['hand_index'];
+        if ($gameModel->discardCard($_SESSION['table_id'], $_SESSION['seat'], $handIndex)) {
+            $response = ['status' => 'success'];
+        } else {
+            $response = ['status' => 'error', 'msg' => 'Discard failed'];
+        }
+    }
+    elseif ($action === 'finish_animation') {
+        // 客户端动画播放完毕
+        if (!isset($_SESSION['table_id'])) throw new Exception("Not logged in");
+        if ($gameModel->finishAnimation($_SESSION['table_id'], $_SESSION['seat'])) {
+            $response = ['status' => 'success'];
+        } else {
+            $response = ['status' => 'error', 'msg' => 'Failed'];
+        }
+    }
     elseif ($action === 'debug_reset') {
         // 重置所有游戏
         $gameModel->resetAllGames();

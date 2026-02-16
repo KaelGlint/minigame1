@@ -1,0 +1,7 @@
+[
+    { "id": 1, "name": "坚守", "des": "为自己增加 20 点护盾", "type": "shield", "cd": 3, "animation": "shield_up", "target": "self", "amount": 20, "loop": true },
+    { "id": 2, "name": "狙击", "des": "对随机敌人造成 15 点伤害", "type": "damage", "cd": 2, "animation": "snipe", "target": "random", "amount": 15, "loop": true },
+    { "id": 3, "name": "扫射", "des": "对全体敌人造成 5 点伤害", "type": "damage", "cd": 4, "animation": "aoe_shot", "target": "all", "amount": 5, "loop": true },
+    { "id": 4, "name": "维修", "des": "治疗己方所有建筑 10 点生命", "type": "heal", "cd": 3, "animation": "repair", "target": "building", "amount": 10, "loop": true },
+    { "id": 5, "name": "挥拳", "des": "对最前面的敌人造成3点伤害", "type": "damage", "cd": 1, "animation": "attack", "target": "front", "amount": 5, "loop": true }
+]

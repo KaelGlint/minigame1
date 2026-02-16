@@ -31,7 +31,19 @@ if (!isset($_SESSION['table_id'])) {
         .slot { width: 80px; height: 100px; background: rgba(255,255,255,0.1); border: 2px dashed #666; display: flex; align-items: center; justify-content: center; position: relative; }
         .card { width: 70px; height: 90px; background: #eee; color: #333; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 12px; cursor: grab; }
         
+        /* 卡牌内部样式优化 */
+        .card .card-name { margin-top: 5px; font-weight: bold; font-size: 12px; text-align: center; }
+        .card .card-skill { margin-top: auto; margin-bottom: 5px; font-size: 10px; color: #333; border-top: 1px solid #999; width: 90%; text-align: center; padding-top: 2px; }
+        .card .skill-name { color: #000; font-weight: bold; }
+        .card .skill-cd { color: #b71c1c; font-weight: bold; }
+
+        .card.disabled { opacity: 0.5; cursor: not-allowed; filter: grayscale(100%); }
+        
         .hand-area { margin-top: auto; padding: 10px; background: rgba(0,0,0,0.2); width: 100%; display: flex; justify-content: center; gap: 10px; min-height: 120px; }
+
+        /* 垃圾箱样式 */
+        .trash-bin { width: 70px; height: 90px; border: 2px dashed #d32f2f; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #d32f2f; cursor: pointer; background: rgba(211, 47, 47, 0.1); transition: all 0.2s; }
+        .trash-bin:hover { background: rgba(211, 47, 47, 0.3); color: white; }
         
         /* 阶段提示 */
         #phase-indicator { position: absolute; top: 5px; left: 50%; transform: translateX(-50%); background: gold; color: black; padding: 2px 10px; border-radius: 4px; font-weight: bold; }
@@ -39,6 +51,7 @@ if (!isset($_SESSION['table_id'])) {
         /* 按钮 */
         #action-btn { padding: 10px 30px; font-size: 16px; cursor: pointer; background: #4CAF50; color: white; border: none; border-radius: 4px; margin-bottom: 10px; }
         #action-btn:disabled { background: #555; cursor: not-allowed; }
+        #finish-deploy-btn { padding: 5px 15px; font-size: 14px; cursor: pointer; background: #2196F3; color: white; border: none; border-radius: 4px; margin-left: 10px; }
 
         /* 弹窗样式 */
         #draft-modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:100; flex-direction:column; align-items:center; justify-content:center; }
@@ -78,6 +91,7 @@ if (!isset($_SESSION['table_id'])) {
     <div id="skill-area">
         <div id="phase-indicator">等待开始...</div>
         <div id="event-display">随机事件区域</div>
+        <button id="finish-deploy-btn" onclick="finishDeployment()" style="display:none;">完成部署</button>
         <button id="quit-btn" onclick="quitGame()">退出游戏</button>
     </div>
 
@@ -132,6 +146,11 @@ if (!isset($_SESSION['table_id'])) {
             if (json.status === 'success') {
                 window.location.href = 'index.php';
             }
+        }
+
+        async function finishDeployment() {
+            await fetch('api.php?action=finish_deployment');
+            fetchState();
         }
     </script>
 </body>

@@ -169,8 +169,8 @@ class GameModel {
             $eventId = $this->getRandomEventId();
             
             // 初始放置指挥部 (ID 999) 到 Slot 5
-            $p1Slots = array_fill(0, 6, null); $p1Slots[5] = 999;
-            $p2Slots = array_fill(0, 6, null); $p2Slots[5] = 999;
+            $p1Slots = array_fill(0, 6, null); $p1Slots[5] = ['id' => 999, 'cd' => 1];
+            $p2Slots = array_fill(0, 6, null); $p2Slots[5] = ['id' => 999, 'cd' => 1];
 
             $this->saveGame($tableId, [
                 'game_status' => 1,      // 进行中
@@ -178,6 +178,8 @@ class GameModel {
                 'turn' => 1,
                 'event_id' => $eventId,
                 'deadline_ts' => time() + 5, // 统一为 5秒 (含弹窗)
+                'p1_gold' => 10, // 初始金币 10
+                'p2_gold' => 10,
                 'p1_slot_cards' => $p1Slots,
                 'p2_slot_cards' => $p2Slots,
                 'card_pool' => [] // 初始为空，会在第一回合自动填充
@@ -217,18 +219,28 @@ class GameModel {
             // 简单的 AI 策略：有空位就放，有牌就放
             $hand = $game['p2_hand_cards'];
             $slots = $game['p2_slot_cards'];
+            $gold = $game['p2_gold'];
+            
             // 确保 slots 长度为 6
             if (count($slots) < 6) $slots = array_pad($slots, 6, null);
 
             $newHand = [];
             foreach ($hand as $cardId) {
+                // 获取卡牌费用 (简单起见，这里假设 AI 知道费用，或者我们加载 cards.json)
+                // 这里为了简化 AI 逻辑，暂时让 AI 无限金币或跳过费用检查，或者简单假设都能买得起
+                // 正规做法是调用 getCardCost($cardId)
+                $cost = $this->getCardCost($cardId);
+                
                 // 找第一个空位
                 $placed = false;
-                for ($i = 0; $i < 6; $i++) {
-                    if (empty($slots[$i])) {
-                        $slots[$i] = $cardId; // 放置卡牌
-                        $placed = true;
-                        break;
+                if ($gold >= $cost) {
+                    for ($i = 0; $i < 6; $i++) {
+                        if (empty($slots[$i])) {
+                            $slots[$i] = ['id' => $cardId, 'cd' => 1]; // 放置卡牌
+                            $gold -= $cost;
+                            $placed = true;
+                            break;
+                        }
                     }
                 }
                 if (!$placed) $newHand[] = $cardId; // 没地方放了，留手里
@@ -236,6 +248,7 @@ class GameModel {
 
             $game['p2_slot_cards'] = $slots;
             $game['p2_hand_cards'] = $newHand;
+            $game['p2_gold'] = $gold;
             $game['p2_status'] = 1; // 部署完成
             $updated = true;
         }
@@ -244,7 +257,8 @@ class GameModel {
             $this->saveGame($tableId, [
                 'p2_status' => $game['p2_status'],
                 'p2_slot_cards' => $game['p2_slot_cards'],
-                'p2_hand_cards' => $game['p2_hand_cards']
+                'p2_hand_cards' => $game['p2_hand_cards'],
+                'p2_gold' => $game['p2_gold']
             ]);
         }
     }
@@ -274,6 +288,7 @@ class GameModel {
         $forceNext = false;
         if ($game['phase'] == 1 && $game[$firstStatus] == 1) $forceNext = true;
         if ($game['phase'] == 2 && $game[$secondStatus] == 1) $forceNext = true;
+        if ($game['phase'] == 3 && $game['p1_status'] == 1 && $game['p2_status'] == 1) $forceNext = true;
 
         // 检查当前阶段是否超时 或 强制跳转
         if ($now > $game['deadline_ts'] || $forceNext) {
@@ -281,6 +296,7 @@ class GameModel {
             $nextDeadline = $now;
             $resetStatus = false;
             $nextTurn = $game['turn'];
+            $updateData = [];
 
             switch ($game['phase']) {
                 case 0: // Event (5s) -> Draft P1
@@ -310,6 +326,13 @@ class GameModel {
                 case 3: // Deployment (33s) -> Resolution
                     $nextPhase = 4;
                     $nextDeadline = $now; // 0s (立即结算)
+                    $resetStatus = true;  // 重置状态用于记录动画播放完成情况
+                    
+                    // 部署结束：处理手牌上限 (弃牌换金币)
+                    $this->handleHandLimit($game, $updateData);
+                    
+                    // 执行战斗结算
+                    $this->resolveBattle($tableId, $game, $updateData);
                     break;
                 case 4: // Resolution (0s) -> Next Turn Event
                     $nextPhase = 0;
@@ -317,21 +340,463 @@ class GameModel {
                     $nextTurn++; // 回合数 +1
                     // 新回合生成新事件
                     $updateData['event_id'] = $this->getRandomEventId();
+                    
+                    // 回合开始：增加金币
+                    $updateData['p1_gold'] = ($game['p1_gold'] ?? 0) + 2;
+                    $updateData['p2_gold'] = ($game['p2_gold'] ?? 0) + 2;
+
+                    // 回合开始：增加所有在场卡牌的 CD
+                    $this->incrementCD($game, $updateData);
                     break;
             }
 
-            $updateData = [
-                'phase' => $nextPhase,
-                'deadline_ts' => $nextDeadline,
-                'turn' => $nextTurn
-            ];
+            $updateData['phase'] = $nextPhase;
+            $updateData['deadline_ts'] = $nextDeadline;
+            $updateData['turn'] = $nextTurn;
 
             if ($resetStatus) {
-                $updateData['p1_status'] = 0;
+                // 如果不是 Phase 4 -> 0 的转换（因为 Phase 4 需要用 status 确认动画），则重置
+                // 但这里 Phase 4 -> 0 已经是下一回合了，所以也要重置
+                $updateData['p1_status'] = 0; 
                 $updateData['p2_status'] = 0;
             }
 
             $this->saveGame($tableId, $updateData);
+        }
+    }
+
+    // --- 部署与战斗辅助逻辑 ---
+
+    // 玩家部署卡牌
+    public function deployCard($tableId, $seat, $handIndex, $slotIndex) {
+        $game = $this->getGame($tableId);
+        
+        // 1. 验证阶段
+        if ($game['phase'] != 3) return false;
+
+        $prefix = ($seat == 1) ? 'p1' : 'p2';
+        $hand = $game[$prefix . '_hand_cards'];
+        $slots = $game[$prefix . '_slot_cards'];
+        $gold = $game[$prefix . '_gold'];
+
+        // 2. 验证索引有效性
+        if (!isset($hand[$handIndex])) return false;
+        // if (!empty($slots[$slotIndex])) return false; // 允许覆盖，移除此检查
+
+        $cardId = $hand[$handIndex];
+        $cost = $this->getCardCost($cardId);
+
+        // 3. 验证金币
+        if ($gold < $cost) return false;
+
+        // 4. 执行部署
+        // 扣除金币
+        $gold -= $cost;
+        // 移除手牌 (使用 array_splice 保持索引连续，或者 unset 但需要前端配合，这里用 splice)
+        array_splice($hand, $handIndex, 1);
+        // 放入槽位 (初始化 CD 为 1)
+        $slots[$slotIndex] = ['id' => $cardId, 'cd' => 1];
+
+        $updateData = [
+            $prefix . '_hand_cards' => $hand,
+            $prefix . '_slot_cards' => $slots,
+            $prefix . '_gold' => $gold
+        ];
+
+        return $this->saveGame($tableId, $updateData);
+    }
+
+    // 玩家标记部署完成
+    public function setDeploymentReady($tableId, $seat) {
+        $game = $this->getGame($tableId);
+        if ($game['phase'] != 3) return false;
+        
+        $field = ($seat == 1) ? 'p1_status' : 'p2_status';
+        return $this->saveGame($tableId, [$field => 1]);
+    }
+
+    // 玩家主动弃牌 (回收)
+    public function discardCard($tableId, $seat, $handIndex) {
+        $game = $this->getGame($tableId);
+        
+        // 1. 验证阶段 (仅部署阶段允许)
+        if ($game['phase'] != 3) return false;
+
+        $prefix = ($seat == 1) ? 'p1' : 'p2';
+        $hand = $game[$prefix . '_hand_cards'];
+        $gold = $game[$prefix . '_gold'];
+
+        // 2. 验证索引
+        if (!isset($hand[$handIndex])) return false;
+
+        // 3. 执行弃牌
+        // 移除手牌
+        array_splice($hand, $handIndex, 1);
+        // 增加 1 金币
+        $gold += 1;
+
+        $updateData = [
+            $prefix . '_hand_cards' => $hand,
+            $prefix . '_gold' => $gold
+        ];
+
+        return $this->saveGame($tableId, $updateData);
+    }
+
+    // 玩家完成动画播放
+    public function finishAnimation($tableId, $seat) {
+        $game = $this->getGame($tableId);
+        if ($game['phase'] != 4) return false;
+        
+        $field = ($seat == 1) ? 'p1_status' : 'p2_status';
+        return $this->saveGame($tableId, [$field => 1]);
+    }
+
+    // 辅助：获取卡牌费用
+    private function getCardCost($cardId) {
+        // 简单缓存机制，避免频繁读文件
+        static $cardsMap = null;
+        if ($cardsMap === null) {
+            $path = __DIR__ . '/assets/data/cards.json';
+            if (file_exists($path)) {
+                $cards = json_decode(file_get_contents($path), true);
+                foreach ($cards as $c) {
+                    $cardsMap[$c['id']] = $c['cost'];
+                }
+            }
+        }
+        return $cardsMap[$cardId] ?? 0;
+    }
+
+    // 辅助：处理手牌上限 (弃牌换金币)
+    private function handleHandLimit($game, &$updateData) {
+        foreach (['p1', 'p2'] as $p) {
+            $hand = $game[$p . '_hand_cards'];
+            $gold = $updateData[$p . '_gold'] ?? $game[$p . '_gold']; // 优先取 updateData 中的值
+            
+            if (count($hand) > 5) {
+                $excessCount = count($hand) - 5;
+                // 保留前5张
+                $newHand = array_slice($hand, 0, 5);
+                // 每弃一张 +1 金币
+                $gold += $excessCount;
+                
+                $updateData[$p . '_hand_cards'] = $newHand;
+                $updateData[$p . '_gold'] = $gold;
+            }
+        }
+    }
+
+    // 辅助：增加场上卡牌 CD
+    private function incrementCD($game, &$updateData) {
+        // 加载技能数据以获取 CD 上限
+        static $skillsMap = null;
+        if ($skillsMap === null) {
+            $path = __DIR__ . '/assets/data/skills.json';
+            if (file_exists($path)) {
+                $skills = json_decode(file_get_contents($path), true);
+                foreach ($skills as $s) {
+                    $skillsMap[$s['id']] = $s;
+                }
+            }
+        }
+        
+        // 加载卡牌数据以获取卡牌对应的 Skill ID
+        static $cardsSkillMap = null;
+        if ($cardsSkillMap === null) {
+            $path = __DIR__ . '/assets/data/cards.json';
+            if (file_exists($path)) {
+                $cards = json_decode(file_get_contents($path), true);
+                foreach ($cards as $c) {
+                    $cardsSkillMap[$c['id']] = $c['skill'];
+                }
+            }
+        }
+
+        foreach (['p1', 'p2'] as $p) {
+            $slots = $game[$p . '_slot_cards'];
+            $changed = false;
+            
+            foreach ($slots as $k => $card) {
+                if (!empty($card) && is_array($card)) {
+                    $cardId = $card['id'];
+                    $skillId = $cardsSkillMap[$cardId] ?? 0;
+                    
+                    if ($skillId && isset($skillsMap[$skillId])) {
+                        $maxCd = $skillsMap[$skillId]['cd'];
+                        $card['cd']++;
+                        // 超过上限重置为 1 (根据需求: "超过CD上限则变回1")
+                        if ($card['cd'] > $maxCd) {
+                            $card['cd'] = 1;
+                        }
+                        $slots[$k] = $card;
+                        $changed = true;
+                    }
+                }
+            }
+            
+            if ($changed) {
+                $updateData[$p . '_slot_cards'] = $slots;
+            }
+        }
+    }
+
+    // --- 技能系统辅助功能 ---
+
+    /**
+     * 1. 数据标准化：确保卡牌拥有用于计算的实时属性
+     */
+    private function ensureCardStats($card, $cardDef) {
+        if (empty($card)) return null;
+        
+        // 初始化 Max HP
+        if (!isset($card['max_hp'])) {
+            $card['max_hp'] = $cardDef['hp'] ?? 10;
+        }
+        
+        // 初始化当前 HP
+        if (!isset($card['hp'])) {
+            $card['hp'] = $cardDef['hp'] ?? 10;
+        }
+
+        // 初始化护盾
+        if (!isset($card['shield'])) {
+            $card['shield'] = 0;
+        }
+
+        return $card;
+    }
+
+    /**
+     * 2. 目标定位：根据技能配置寻找目标
+     */
+    private function findTargetIndices($skillDef, $casterIndex, $mySlots, $enemySlots, $cardsMap) {
+        $targetType = $skillDef['target']; // self, front, back, random, all, building...
+        $effectType = $skillDef['type'];   // damage, heal, shield...
+
+        // 判定阵营：伤害类技能默认找敌人，增益类默认找自己
+        $targetSlots = ($effectType === 'damage') ? $enemySlots : $mySlots;
+        
+        // 筛选出所有存活的候选目标
+        $candidates = [];
+        foreach ($targetSlots as $index => $card) {
+            if (!empty($card)) {
+                $cardDef = $cardsMap[$card['id']] ?? null;
+                if ($cardDef) {
+                    $candidates[] = ['index' => $index, 'card' => $card, 'def' => $cardDef];
+                }
+            }
+        }
+
+        $indices = [];
+
+        switch ($targetType) {
+            case 'self':
+                $indices[] = $casterIndex;
+                break;
+            case 'front':
+                if (count($candidates) > 0) {
+                    $indices[] = $candidates[0]['index'];
+                }
+                break;
+            case 'back':
+                if (count($candidates) > 0) {
+                    $indices[] = $candidates[count($candidates) - 1]['index'];
+                }
+                break;
+            case 'random':
+                if (count($candidates) > 0) {
+                    $randKey = array_rand($candidates);
+                    $indices[] = $candidates[$randKey]['index'];
+                }
+                break;
+            case 'all':
+                foreach ($candidates as $c) $indices[] = $c['index'];
+                break;
+            default:
+                // 按类型筛选 (hero, building, resource, npc)
+                foreach ($candidates as $c) {
+                    if (($c['def']['type'] ?? '') === $targetType) {
+                        $indices[] = $c['index'];
+                    }
+                }
+                break;
+        }
+
+        return [
+            'indices' => $indices,
+            'side' => ($effectType === 'damage') ? 'enemy' : 'friend'
+        ];
+    }
+
+    /**
+     * 3. 效果计算
+     */
+    private function applySkillEffect(&$targetCard, $skillDef) {
+        $type = $skillDef['type'];
+        $amount = $skillDef['amount'];
+        $logDetail = '';
+
+        if ($type === 'damage') {
+            $damage = $amount;
+            
+            // 护盾抵消
+            if (($targetCard['shield'] ?? 0) > 0) {
+                if ($targetCard['shield'] >= $damage) {
+                    $targetCard['shield'] -= $damage;
+                    $damage = 0;
+                    $logDetail = "(Shield blocked)";
+                } else {
+                    $damage -= $targetCard['shield'];
+                    $targetCard['shield'] = 0;
+                    $logDetail = "(Shield broke)";
+                }
+            }
+
+            // 扣除 HP
+            $targetCard['hp'] -= $damage;
+            
+        } elseif ($type === 'heal') {
+            $oldHp = $targetCard['hp'];
+            $targetCard['hp'] += $amount;
+            if ($targetCard['hp'] > $targetCard['max_hp']) {
+                $targetCard['hp'] = $targetCard['max_hp'];
+            }
+            $healed = $targetCard['hp'] - $oldHp;
+            $logDetail = "+$healed HP";
+
+        } elseif ($type === 'shield') {
+            $targetCard['shield'] = ($targetCard['shield'] ?? 0) + $amount;
+            $logDetail = "+$amount Shield";
+        }
+
+        return $logDetail;
+    }
+
+    // --- 战斗核心逻辑 ---
+    private function resolveBattle($tableId, $game, &$updateData) {
+        // 1. 加载数据
+        $cardsMap = [];
+        $skillsMap = [];
+        
+        $cardsJson = json_decode(file_get_contents(__DIR__ . '/assets/data/cards.json'), true);
+        foreach ($cardsJson as $c) $cardsMap[$c['id']] = $c;
+
+        $skillsJson = json_decode(file_get_contents(__DIR__ . '/assets/data/skills.json'), true);
+        foreach ($skillsJson as $s) $skillsMap[$s['id']] = $s;
+
+        // 2. 准备战斗数据
+        $p1Slots = $updateData['p1_slot_cards'] ?? $game['p1_slot_cards'];
+        $p2Slots = $updateData['p2_slot_cards'] ?? $game['p2_slot_cards'];
+        
+        // 确保数组长度
+        $p1Slots = array_pad($p1Slots, 6, null);
+        $p2Slots = array_pad($p2Slots, 6, null);
+
+        // 预处理：确保所有卡牌都有战斗属性 (HP, Shield等)
+        for ($i = 0; $i < 6; $i++) {
+            if (!empty($p1Slots[$i])) $p1Slots[$i] = $this->ensureCardStats($p1Slots[$i], $cardsMap[$p1Slots[$i]['id']] ?? []);
+            if (!empty($p2Slots[$i])) $p2Slots[$i] = $this->ensureCardStats($p2Slots[$i], $cardsMap[$p2Slots[$i]['id']] ?? []);
+        }
+
+        $battleLog = [];
+        $isP1First = ($game['turn'] % 2 != 0); // 当前回合谁是先手
+        // 后手玩家 (Second Player) 在同位置先行动
+        // 如果 P1 是先手，则 P2 是后手，P2 先动
+
+        // 3. 遍历槽位 (0-5)
+        for ($i = 0; $i < 6; $i++) {
+            // 确定行动顺序
+            // 顺序：后手 -> 先手
+            $order = $isP1First ? ['p2', 'p1'] : ['p1', 'p2'];
+            
+            foreach ($order as $player) {
+                // 定义己方和敌方槽位引用
+                if ($player == 'p1') {
+                    $mySlots = &$p1Slots;
+                    $enemySlots = &$p2Slots;
+                } else {
+                    $mySlots = &$p2Slots;
+                    $enemySlots = &$p1Slots;
+                }
+
+                $card = $mySlots[$i];
+
+                if (empty($card) || !is_array($card)) continue;
+
+                $cardDef = $cardsMap[$card['id']] ?? null;
+                if (!$cardDef) continue;
+
+                $skillId = $cardDef['skill'];
+                $skillDef = $skillsMap[$skillId] ?? null;
+
+                // 检查 CD 是否就绪 (当前CD == MaxCD)
+                if ($skillDef && $card['cd'] >= $skillDef['cd']) {
+                    // 寻找目标
+                    $targetResult = $this->findTargetIndices($skillDef, $i, $mySlots, $enemySlots, $cardsMap);
+                    $targetIndices = $targetResult['indices'];
+                    $targetSide = $targetResult['side']; // 'friend' or 'enemy'
+
+                    // 确定目标槽位数组
+                    if ($targetSide === 'friend') {
+                        $targetSlots = &$mySlots;
+                    } else {
+                        $targetSlots = &$enemySlots;
+                    }
+
+                    $logTargets = [];
+
+                    foreach ($targetIndices as $tIdx) {
+                        if (empty($targetSlots[$tIdx])) continue;
+
+                        // 应用效果
+                        $this->applySkillEffect($targetSlots[$tIdx], $skillDef);
+                        
+                        $logTargets[] = $tIdx;
+
+                        // 死亡判定
+                        if ($targetSlots[$tIdx]['hp'] <= 0) {
+                            $targetSlots[$tIdx] = null; // 移除
+                        }
+                    }
+
+                    // 记录日志
+                    if (!empty($logTargets)) {
+                        $battleLog[] = [
+                            'source' => $player,
+                            'slot' => $i,
+                            'skill' => $skillDef['name'],
+                            'targets' => $logTargets,
+                            'damage' => $skillDef['amount'], // 前端显示用基础数值
+                            'effect' => $skillDef['type']
+                        ];
+                    }
+                }
+                
+                // 解除引用，防止循环中变量污染
+                unset($mySlots, $enemySlots, $targetSlots);
+            }
+        }
+
+        // 4. 保存战斗结果
+        $updateData['p1_slot_cards'] = $p1Slots;
+        $updateData['p2_slot_cards'] = $p2Slots;
+        $updateData['battle_log'] = $battleLog;
+
+        // 5. 胜负判定
+        // 规则：指挥部 (ID 999) 被毁 或 场上无卡
+        $p1Alive = false; $p1Base = false;
+        foreach ($p1Slots as $s) { if($s) { $p1Alive=true; if($s['id']==999) $p1Base=true; } }
+        
+        $p2Alive = false; $p2Base = false;
+        foreach ($p2Slots as $s) { if($s) { $p2Alive=true; if($s['id']==999) $p2Base=true; } }
+
+        if (!$p1Alive || !$p1Base) {
+            $updateData['game_status'] = 2; // 结束
+            $updateData['winner'] = 'p2'; // 需在表结构添加 winner 字段，或直接用 status 区分
+        } elseif (!$p2Alive || !$p2Base) {
+            $updateData['game_status'] = 2;
+            $updateData['winner'] = 'p1';
         }
     }
 
