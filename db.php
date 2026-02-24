@@ -36,6 +36,7 @@ class GameModel {
             draft_cards TEXT DEFAULT '[]',
             draft_picks TEXT DEFAULT '{\"p1\":[], \"p2\":[]}',
             skill_queue TEXT DEFAULT '[]', battle_log TEXT DEFAULT '[]',
+            winner TEXT,
             updated_at INTEGER
         )";
         $this->db->exec($sql);
@@ -44,7 +45,8 @@ class GameModel {
         $migrations = [
             'card_pool' => "TEXT DEFAULT '[]'",
             'draft_cards' => "TEXT DEFAULT '[]'",
-            'draft_picks' => "TEXT DEFAULT '{\"p1\":[], \"p2\":[]}'"
+            'draft_picks' => "TEXT DEFAULT '{\"p1\":[], \"p2\":[]}'",
+            'winner' => "TEXT"
         ];
         foreach ($migrations as $col => $def) {
             try {
@@ -126,6 +128,11 @@ class GameModel {
 
     // 获取大厅列表状态
     public function getLobbyStatus() {
+        // 在获取列表前，触发所有桌子的流程更新（用于清理已结束的游戏）
+        for ($i = 1; $i <= 4; $i++) {
+            $this->updateGameFlow($i);
+        }
+
         $stmt = $this->db->query("SELECT table_id, p1_name, p2_name, game_status FROM games ORDER BY table_id ASC");
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
@@ -273,6 +280,14 @@ class GameModel {
             $game = $this->getGame($tableId); // 刷新数据
         }
 
+        // 自动清理机制：如果游戏已结束 (Status 2) 且超过保留时间，重置桌子
+        if ($game['game_status'] == 2) {
+            if (time() > $game['deadline_ts']) {
+                $this->resetGame($tableId);
+            }
+            return;
+        }
+
         if ($game['game_status'] != 1) return;
 
         $now = time();
@@ -289,6 +304,7 @@ class GameModel {
         if ($game['phase'] == 1 && $game[$firstStatus] == 1) $forceNext = true;
         if ($game['phase'] == 2 && $game[$secondStatus] == 1) $forceNext = true;
         if ($game['phase'] == 3 && $game['p1_status'] == 1 && $game['p2_status'] == 1) $forceNext = true;
+        if ($game['phase'] == 4 && $game['p1_status'] == 1 && $game['p2_status'] == 1) $forceNext = true;
 
         // 检查当前阶段是否超时 或 强制跳转
         if ($now > $game['deadline_ts'] || $forceNext) {
@@ -325,7 +341,7 @@ class GameModel {
                     break;
                 case 3: // Deployment (33s) -> Resolution
                     $nextPhase = 4;
-                    $nextDeadline = $now; // 0s (立即结算)
+                    $nextDeadline = $now + 5; // 5s 等待动画播放
                     $resetStatus = true;  // 重置状态用于记录动画播放完成情况
                     
                     // 部署结束：处理手牌上限 (弃牌换金币)
@@ -338,15 +354,46 @@ class GameModel {
                     $nextPhase = 0;
                     $nextDeadline = $now + 5;
                     $nextTurn++; // 回合数 +1
-                    // 新回合生成新事件
-                    $updateData['event_id'] = $this->getRandomEventId();
                     
-                    // 回合开始：增加金币
+                    // 1. 回合开始：增加金币
                     $updateData['p1_gold'] = ($game['p1_gold'] ?? 0) + 2;
                     $updateData['p2_gold'] = ($game['p2_gold'] ?? 0) + 2;
 
-                    // 回合开始：增加所有在场卡牌的 CD
+                    // 2. 回合开始：增加所有在场卡牌的 CD
                     $this->incrementCD($game, $updateData);
+
+                    // 3. 回合开始：清除所有护盾 (Global & Cards)
+                    $updateData['p1_shield'] = 0;
+                    $updateData['p2_shield'] = 0;
+                    foreach (['p1', 'p2'] as $p) {
+                        $slots = $updateData[$p . '_slot_cards'] ?? $game[$p . '_slot_cards'];
+                        foreach ($slots as $k => $card) {
+                            if (!empty($card) && is_array($card)) {
+                                $slots[$k]['shield'] = 0;
+                            }
+                        }
+                        $updateData[$p . '_slot_cards'] = $slots;
+                    }
+
+                    // 4. 回合开始：清理过期的 Buff (Phase 4 -> 0)
+                    foreach (['p1', 'p2'] as $p) {
+                        $buffs = $updateData[$p . '_buff'] ?? $game[$p . '_buff'];
+                        $newBuffs = [];
+                        foreach ($buffs as $b) {
+                            // 兼容旧格式 (纯ID)
+                            if (!is_array($b)) $b = ['id' => $b, 'turns' => 1];
+                            
+                            $b['turns']--;
+                            if ($b['turns'] > 0) {
+                                $newBuffs[] = $b;
+                            }
+                        }
+                        $updateData[$p . '_buff'] = $newBuffs;
+                    }
+
+                    // 5. 新回合生成新事件 (放在最后，防止新Buff被清理)
+                    $updateData['event_id'] = $this->getRandomEventId();
+                    $this->applyEventEffect($updateData['event_id'], $updateData, $game);
                     break;
             }
 
@@ -541,6 +588,40 @@ class GameModel {
         }
     }
 
+    // --- Buff 系统辅助功能 ---
+
+    /**
+     * 计算单位受到的 Buff 修正
+     * 返回: ['att' => 0, 'hp' => 0, 'shield' => 0]
+     */
+    private function calculateBuffStats($card, $playerBuffs, $buffsMap, $isMyCard) {
+        $stats = ['att' => 0, 'hp' => 0, 'shield' => 0];
+        if (empty($playerBuffs)) return $stats;
+
+        foreach ($playerBuffs as $buffItem) {
+            $buffId = is_array($buffItem) ? $buffItem['id'] : $buffItem; // 兼容旧格式
+            $buffDef = $buffsMap[$buffId] ?? null;
+            if (!$buffDef) continue;
+
+            // 1. 判定类型 (Target Type)
+            $targetFilter = $buffDef['target'][1] ?? 'all';
+            // 如果 Filter 不是 'all' 且卡牌类型不匹配 -> 跳过
+            if ($targetFilter !== 'all' && ($card['type'] ?? '') !== $targetFilter) continue;
+
+            // 2. 累加数值
+            if ($buffDef['type'] === 'att') {
+                $stats['att'] += $buffDef['amount'];
+            } elseif ($buffDef['type'] === 'hp') {
+                $stats['hp'] += $buffDef['amount'];
+            } elseif ($buffDef['type'] === 'shield') {
+                $stats['shield'] += $buffDef['amount'];
+            }
+            // function 类型暂不处理
+        }
+
+        return $stats;
+    }
+
     // --- 技能系统辅助功能 ---
 
     /**
@@ -635,26 +716,25 @@ class GameModel {
     private function applySkillEffect(&$targetCard, $skillDef) {
         $type = $skillDef['type'];
         $amount = $skillDef['amount'];
-        $logDetail = '';
+        $actualAmount = 0;
 
         if ($type === 'damage') {
             $damage = $amount;
             
-            // 护盾抵消
+            // 1. 卡牌护盾抵消逻辑 (Gate Mechanic)
             if (($targetCard['shield'] ?? 0) > 0) {
+                // 只要有护盾，完全抵消本次伤害
                 if ($targetCard['shield'] >= $damage) {
                     $targetCard['shield'] -= $damage;
-                    $damage = 0;
-                    $logDetail = "(Shield blocked)";
                 } else {
-                    $damage -= $targetCard['shield'];
                     $targetCard['shield'] = 0;
-                    $logDetail = "(Shield broke)";
                 }
+                $damage = 0; // 伤害置为 0
             }
 
-            // 扣除 HP
+            // 2. 扣除 HP
             $targetCard['hp'] -= $damage;
+            $actualAmount = $damage;
             
         } elseif ($type === 'heal') {
             $oldHp = $targetCard['hp'];
@@ -662,15 +742,14 @@ class GameModel {
             if ($targetCard['hp'] > $targetCard['max_hp']) {
                 $targetCard['hp'] = $targetCard['max_hp'];
             }
-            $healed = $targetCard['hp'] - $oldHp;
-            $logDetail = "+$healed HP";
+            $actualAmount = $targetCard['hp'] - $oldHp;
 
         } elseif ($type === 'shield') {
             $targetCard['shield'] = ($targetCard['shield'] ?? 0) + $amount;
-            $logDetail = "+$amount Shield";
+            $actualAmount = $amount;
         }
 
-        return $logDetail;
+        return $actualAmount;
     }
 
     // --- 战斗核心逻辑 ---
@@ -678,12 +757,16 @@ class GameModel {
         // 1. 加载数据
         $cardsMap = [];
         $skillsMap = [];
+        $buffsMap = [];
         
         $cardsJson = json_decode(file_get_contents(__DIR__ . '/assets/data/cards.json'), true);
         foreach ($cardsJson as $c) $cardsMap[$c['id']] = $c;
 
         $skillsJson = json_decode(file_get_contents(__DIR__ . '/assets/data/skills.json'), true);
         foreach ($skillsJson as $s) $skillsMap[$s['id']] = $s;
+
+        $buffsJson = json_decode(file_get_contents(__DIR__ . '/assets/data/buff.json'), true);
+        foreach ($buffsJson as $b) $buffsMap[$b['id']] = $b;
 
         // 2. 准备战斗数据
         $p1Slots = $updateData['p1_slot_cards'] ?? $game['p1_slot_cards'];
@@ -693,10 +776,24 @@ class GameModel {
         $p1Slots = array_pad($p1Slots, 6, null);
         $p2Slots = array_pad($p2Slots, 6, null);
 
-        // 预处理：确保所有卡牌都有战斗属性 (HP, Shield等)
+        // 获取双方 Buff 列表
+        $p1Buffs = $updateData['p1_buff'] ?? $game['p1_buff'];
+        $p2Buffs = $updateData['p2_buff'] ?? $game['p2_buff'];
+
+        // 获取当前全局护盾 (用于战斗计算)
+        $p1GlobalShield = $updateData['p1_shield'] ?? $game['p1_shield'];
+        $p2GlobalShield = $updateData['p2_shield'] ?? $game['p2_shield'];
+
+        // 预处理：确保所有卡牌都有战斗属性，并应用 HP/Shield Buff (战斗前生效)
         for ($i = 0; $i < 6; $i++) {
-            if (!empty($p1Slots[$i])) $p1Slots[$i] = $this->ensureCardStats($p1Slots[$i], $cardsMap[$p1Slots[$i]['id']] ?? []);
-            if (!empty($p2Slots[$i])) $p2Slots[$i] = $this->ensureCardStats($p2Slots[$i], $cardsMap[$p2Slots[$i]['id']] ?? []);
+            if (!empty($p1Slots[$i])) {
+                $p1Slots[$i] = $this->ensureCardStats($p1Slots[$i], $cardsMap[$p1Slots[$i]['id']] ?? []);
+                // 应用 P1 的 Buff 到 P1 的卡
+                // 注意：这里暂时只处理 HP 上限提升等被动效果，或者可以在 applySkillEffect 中动态计算
+            }
+            if (!empty($p2Slots[$i])) {
+                $p2Slots[$i] = $this->ensureCardStats($p2Slots[$i], $cardsMap[$p2Slots[$i]['id']] ?? []);
+            }
         }
 
         $battleLog = [];
@@ -715,9 +812,11 @@ class GameModel {
                 if ($player == 'p1') {
                     $mySlots = &$p1Slots;
                     $enemySlots = &$p2Slots;
+                    $myBuffs = $p1Buffs;
                 } else {
                     $mySlots = &$p2Slots;
                     $enemySlots = &$p1Slots;
+                    $myBuffs = $p2Buffs;
                 }
 
                 $card = $mySlots[$i];
@@ -732,6 +831,29 @@ class GameModel {
 
                 // 检查 CD 是否就绪 (当前CD == MaxCD)
                 if ($skillDef && $card['cd'] >= $skillDef['cd']) {
+                    
+                    // --- 特殊处理：Buff 类技能 ---
+                    if ($skillDef['type'] === 'buff') {
+                        // 直接给玩家添加 Buff
+                        // 假设 skillDef['amount'] 存储的是 buff_id
+                        $buffId = (int)$skillDef['amount'];
+                        $buffDuration = $buffsMap[$buffId]['duration'] ?? 1;
+                        
+                        // 添加到 updateData (需要合并现有 buff)
+                        // 注意：这里简化处理，直接修改 $myBuffs 引用并不会自动保存回 updateData，需要手动处理
+                        $newBuffEntry = ['id' => $buffId, 'turns' => $buffDuration];
+                        
+                        // 根据目标决定添加到谁的列表 (self -> 己方, enemy -> 对方)
+                        $isEnemyTarget = ($skillDef['target'] === 'enemy');
+                        $targetP1 = ($player == 'p1' && !$isEnemyTarget) || ($player == 'p2' && $isEnemyTarget);
+
+                        if ($targetP1) $p1Buffs[] = $newBuffEntry;
+                        else $p2Buffs[] = $newBuffEntry;
+
+                        $battleLog[] = ['source' => $player, 'slot' => $i, 'skill' => $skillDef['name'], 'targets' => [], 'effect' => 'buff', 'damage' => 0];
+                        continue; // Buff 技能释放完就结束
+                    }
+
                     // 寻找目标
                     $targetResult = $this->findTargetIndices($skillDef, $i, $mySlots, $enemySlots, $cardsMap);
                     $targetIndices = $targetResult['indices'];
@@ -744,30 +866,65 @@ class GameModel {
                         $targetSlots = &$enemySlots;
                     }
 
-                    $logTargets = [];
+                    $logTargetDetails = [];
 
                     foreach ($targetIndices as $tIdx) {
                         if (empty($targetSlots[$tIdx])) continue;
 
-                        // 应用效果
-                        $this->applySkillEffect($targetSlots[$tIdx], $skillDef);
-                        
-                        $logTargets[] = $tIdx;
+                        // 计算 Buff 修正 (攻击力)
+                        // 只有伤害类技能才享受攻击力加成
+                        $finalSkillDef = $skillDef;
+                        if ($skillDef['type'] === 'damage') {
+                            // 计算施法者受到的 Buff
+                            // 注意：这里需要传入施法者卡牌信息来判断是否符合 Buff 条件
+                            $buffStats = $this->calculateBuffStats($card, $myBuffs, $buffsMap, true);
+                            $finalSkillDef['amount'] += $buffStats['att'];
+                        }
 
+                        // 全局护盾抵消逻辑 (Gate Mechanic)
+                        if ($finalSkillDef['type'] === 'damage') {
+                            // 判断目标属于哪一方
+                            $isTargetP1 = ($player === 'p1' && $targetSide === 'friend') || ($player === 'p2' && $targetSide === 'enemy');
+                            $currentGlobalShield = $isTargetP1 ? $p1GlobalShield : $p2GlobalShield;
+
+                            if ($currentGlobalShield > 0) {
+                                // 只要有护盾，完全抵消本次伤害
+                                if ($currentGlobalShield >= $finalSkillDef['amount']) {
+                                    $currentGlobalShield -= $finalSkillDef['amount'];
+                                } else {
+                                    $currentGlobalShield = 0;
+                                }
+                                $finalSkillDef['amount'] = 0; // 伤害置为 0
+                                // 更新本地变量
+                                if ($isTargetP1) $p1GlobalShield = $currentGlobalShield; else $p2GlobalShield = $currentGlobalShield;
+                            }
+                        }
+
+                        // 应用效果
+                        $actualAmount = $this->applySkillEffect($targetSlots[$tIdx], $finalSkillDef);
+                        
                         // 死亡判定
-                        if ($targetSlots[$tIdx]['hp'] <= 0) {
+                        $isDead = ($targetSlots[$tIdx]['hp'] <= 0);
+                        if ($isDead) {
                             $targetSlots[$tIdx] = null; // 移除
                         }
+
+                        $logTargetDetails[] = [
+                            'slot' => $tIdx,
+                            'damage' => $actualAmount,
+                            'is_dead' => $isDead
+                        ];
                     }
 
                     // 记录日志
-                    if (!empty($logTargets)) {
+                    if (!empty($logTargetDetails)) {
                         $battleLog[] = [
                             'source' => $player,
                             'slot' => $i,
                             'skill' => $skillDef['name'],
-                            'targets' => $logTargets,
-                            'damage' => $skillDef['amount'], // 前端显示用基础数值
+                            'target_details' => $logTargetDetails, // 包含详细信息的数组
+                            'targets' => array_column($logTargetDetails, 'slot'), // 兼容旧字段
+                            'damage' => $logTargetDetails[0]['damage'], // 兼容旧字段(取第一个)
                             'effect' => $skillDef['type']
                         ];
                     }
@@ -782,6 +939,10 @@ class GameModel {
         $updateData['p1_slot_cards'] = $p1Slots;
         $updateData['p2_slot_cards'] = $p2Slots;
         $updateData['battle_log'] = $battleLog;
+        $updateData['p1_buff'] = $p1Buffs;
+        $updateData['p2_buff'] = $p2Buffs;
+        $updateData['p1_shield'] = $p1GlobalShield;
+        $updateData['p2_shield'] = $p2GlobalShield;
 
         // 5. 胜负判定
         // 规则：指挥部 (ID 999) 被毁 或 场上无卡
@@ -794,9 +955,11 @@ class GameModel {
         if (!$p1Alive || !$p1Base) {
             $updateData['game_status'] = 2; // 结束
             $updateData['winner'] = 'p2'; // 需在表结构添加 winner 字段，或直接用 status 区分
+            $updateData['deadline_ts'] = time() + 10; // 10秒后重置桌子
         } elseif (!$p2Alive || !$p2Base) {
             $updateData['game_status'] = 2;
             $updateData['winner'] = 'p1';
+            $updateData['deadline_ts'] = time() + 10; // 10秒后重置桌子
         }
     }
 
@@ -1040,13 +1203,74 @@ class GameModel {
 
     // 随机获取一个事件ID
     private function getRandomEventId() {
-        // 为了极致性能，这里不每次都读文件，而是硬编码范围
-        // 如果事件列表变动频繁，可以改为读取 events.json
-        // $events = json_decode(file_get_contents(__DIR__ . '/assets/data/events.json'), true);
-        // return $events[array_rand($events)]['id'];
+        $path = __DIR__ . '/assets/data/events.json';
+        if (!file_exists($path)) return 0;
         
-        // 目前有 4 个事件
-        return rand(1, 4);
+        $events = json_decode(file_get_contents($path), true);
+        if (empty($events)) return 0;
+        
+        $randKey = array_rand($events);
+        return $events[$randKey]['id'];
+    }
+
+    // 应用随机事件效果
+    private function applyEventEffect($eventId, &$updateData, $game) {
+        $path = __DIR__ . '/assets/data/events.json';
+        if (!file_exists($path)) return;
+        
+        $events = json_decode(file_get_contents($path), true);
+        $event = null;
+        foreach ($events as $e) {
+            if ($e['id'] == $eventId) {
+                $event = $e;
+                break;
+            }
+        }
+        if (!$event) return;
+
+        // 遍历双方玩家应用效果
+        foreach (['p1', 'p2'] as $p) {
+            // 1. 增加金币 (type: gold)
+            if (($event['type'] ?? '') === 'gold') {
+                $current = $updateData[$p . '_gold'] ?? $game[$p . '_gold'];
+                $updateData[$p . '_gold'] = $current + ($event['amount'] ?? 0);
+            }
+            
+            // 2. 增加护盾 (type: shield)
+            if (($event['type'] ?? '') === 'shield') {
+                $current = $updateData[$p . '_shield'] ?? $game[$p . '_shield'];
+                $updateData[$p . '_shield'] = $current + ($event['amount'] ?? 0);
+            }
+
+            // 3. 获得 NPC 卡牌 (type: card, card_type: npc)
+            if (($event['type'] ?? '') === 'card') {
+                $targetType = $event['card_type'] ?? 'npc';
+                // 读取 cards.json 筛选
+                $cards = json_decode(file_get_contents(__DIR__ . '/assets/data/cards.json'), true);
+                $candidates = [];
+                foreach ($cards as $c) {
+                    if (($c['type'] ?? '') === $targetType) $candidates[] = $c['id'];
+                }
+                
+                if (!empty($candidates)) {
+                    $cardId = $candidates[array_rand($candidates)];
+                    $hand = $updateData[$p . '_hand_cards'] ?? $game[$p . '_hand_cards'];
+                    $hand[] = $cardId;
+                    $updateData[$p . '_hand_cards'] = $hand;
+                }
+            }
+
+            // 4. 添加 Buff (type: buff, buff_id: X)
+            if (($event['type'] ?? '') === 'buff') {
+                $buffId = $event['buff_id'] ?? 0;
+                if ($buffId) {
+                    // 默认持续 1 回合
+                    $buffs = $updateData[$p . '_buff'] ?? $game[$p . '_buff'];
+                    $buffs[] = ['id' => $buffId, 'turns' => 1]; 
+                    $updateData[$p . '_buff'] = $buffs;
+                }
+            }
+        }
     }
 }
 ?>

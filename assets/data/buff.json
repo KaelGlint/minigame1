@@ -1,0 +1,5 @@
+[
+    { "id": 1, "name": "全军突击", "desc": "己方所有单位攻击力 +2", "type": "att", "target": ["self", "all"], "amount": 2, "icon": "⚔️", "duration": 1 },
+    { "id": 2, "name": "坚固工事", "desc": "己方所有建筑生命 +5", "type": "hp", "target": ["self", "building"], "amount": 5, "icon": "🧱", "duration": 2 },
+    { "id": 3, "name": "士气低落", "desc": "敌方所有单位攻击力 -1", "type": "att", "target": ["enemy", "all"], "amount": -1, "icon": "😰", "duration": 1 }
+]

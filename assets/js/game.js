@@ -6,7 +6,9 @@ let lastGameState = null;
 let eventDefinitions = []; // 存储事件定义
 let cardDefinitions = {};  // 存储卡牌定义 (ID -> Data)
 let skillDefinitions = {}; // 存储技能定义 (ID -> Data)
+let buffDefinitions = {};  // 存储 Buff 定义
 let isAnimating = false;   // 动画播放锁
+let pollInterval = null;   // 轮询定时器
 
 // 初始化
 document.addEventListener('DOMContentLoaded', async () => {
@@ -14,10 +16,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     await Promise.all([
         loadEventDefinitions(),
         loadCardDefinitions(),
-        loadSkillDefinitions()
+        loadSkillDefinitions(),
+        loadBuffDefinitions()
     ]);
     fetchState();
-    setInterval(fetchState, POLLING_INTERVAL);
+    pollInterval = setInterval(fetchState, POLLING_INTERVAL);
 });
 
 async function fetchState() {
@@ -70,6 +73,18 @@ async function loadSkillDefinitions() {
     }
 }
 
+async function loadBuffDefinitions() {
+    try {
+        const res = await fetch('assets/data/buff.json');
+        const buffs = await res.json();
+        buffs.forEach(b => {
+            buffDefinitions[b.id] = b;
+        });
+    } catch (e) {
+        console.error("Failed to load buffs:", e);
+    }
+}
+
 function updateUI(game) {
     // 避免重复渲染 (简单优化)
     // if (JSON.stringify(game) === JSON.stringify(lastGameState)) return;
@@ -83,11 +98,13 @@ function updateUI(game) {
 
     // 2. 更新顶部状态栏 (敌方)
     document.getElementById('enemy-name').innerText = game[enemyPrefix + '_name'] || '等待加入...';
+    document.getElementById('enemy-buff').innerHTML = renderBuffs(game[enemyPrefix + '_buff']);
     document.getElementById('enemy-hp').innerText = game[enemyPrefix + '_hp'];
     document.getElementById('enemy-shield').innerText = game[enemyPrefix + '_shield'];
     document.getElementById('enemy-gold').innerText = game[enemyPrefix + '_gold'];
 
     // 3. 更新底部状态栏 (我方)
+    document.getElementById('my-buff').innerHTML = renderBuffs(game[myPrefix + '_buff']);
     document.getElementById('my-hp').innerText = game[myPrefix + '_hp'];
     document.getElementById('my-shield').innerText = game[myPrefix + '_shield'];
     document.getElementById('my-gold').innerText = game[myPrefix + '_gold'];
@@ -116,6 +133,13 @@ function updateUI(game) {
     // 战斗结算动画 (Phase 4)
     if (game.phase === 4) {
         const myStatus = game[myPrefix + '_status'];
+        
+        // 修复：如果是刷新页面进入 Phase 4 (lastGameState 为空)，先渲染一次静态棋盘，否则动画找不到 DOM 元素
+        if (!lastGameState) {
+             renderSlots('player-slots', game[myPrefix + '_slot_cards'], game, false);
+             renderSlots('enemy-slots', game[enemyPrefix + '_slot_cards'], game, false);
+        }
+
         // 如果我还没完成动画，且有战斗日志
         if (myStatus === 0 && game.battle_log && game.battle_log.length > 0) {
             playBattleAnimation(game.battle_log, myPrefix);
@@ -124,6 +148,27 @@ function updateUI(game) {
             // 没有日志（无事发生），直接完成
             finishAnimation();
         }
+    }
+
+    // 0. 检查游戏是否结束 (移到动画检查之后)
+    if (game.game_status === 2) {
+        const modal = document.getElementById('announcement-modal');
+        const text = document.getElementById('announcement-text');
+        
+        let msg = "游戏结束";
+        if (game.winner === myPrefix) {
+            msg = "🎉 胜利！ 🎉";
+            text.style.color = "#4CAF50";
+        } else {
+            msg = "💀 失败 💀";
+            text.style.color = "#f44336";
+        }
+        text.innerText = msg;
+        modal.style.display = 'flex';
+        
+        // 停止心跳包
+        if (pollInterval) clearInterval(pollInterval);
+        return; // 停止后续渲染
     }
 
     // 6. 处理抽卡弹窗 (Phase 1 & 2)
@@ -215,6 +260,19 @@ function updateUI(game) {
 
     // 更新本地状态记录
     lastGameState = game;
+}
+
+function renderBuffs(buffList) {
+    if (!buffList || buffList.length === 0) return '';
+    let html = '';
+    buffList.forEach(b => {
+        const id = (typeof b === 'object') ? b.id : b;
+        const def = buffDefinitions[id];
+        if (def) {
+            html += `<span title="${def.name}: ${def.desc}">${def.icon}</span>`;
+        }
+    });
+    return html;
 }
 
 function renderDraftCards(game) {
@@ -314,9 +372,10 @@ function renderSlots(containerId, slotData, game, canDrop = false) {
             const cardDiv = document.createElement('div');
             cardDiv.className = 'card';
             const cardData = cardDefinitions[cardId] || { name: '未知' };
+            const shieldDisplay = (slotItem.shield > 0) ? ` | 🛡️${slotItem.shield}` : '';
             
             // 渲染卡牌主体
-            cardDiv.innerHTML = `<div class="card-name">${cardData.name}</div><div style="text-align:center; color:green; font-weight:bold;">HP: ${currentHp}</div>`;
+            cardDiv.innerHTML = `<div class="card-name">${cardData.name}</div><div style="text-align:center; color:green; font-weight:bold;">HP: ${currentHp}${shieldDisplay}</div>`;
 
             // 渲染技能区域 (如果有技能)
             if (cardData.skill && skillDefinitions[cardData.skill]) {
@@ -365,65 +424,6 @@ async function handleTrashDrop(e, trashDiv) {
     formData.append('hand_index', handIndex);
     await fetch('api.php?action=discard_card', { method: 'POST', body: formData });
     fetchState();
-}
-
-async function playBattleAnimation(logs, myPrefix) {
-    isAnimating = true;
-    const enemyPrefix = (myPrefix === 'p1') ? 'p2' : 'p1';
-    
-    // 简单提示
-    const phaseIndicator = document.getElementById('phase-indicator');
-    phaseIndicator.innerText = "战斗进行中...";
-    phaseIndicator.style.background = "red";
-    phaseIndicator.style.color = "white";
-
-    for (const log of logs) {
-        // 1. 高亮攻击者
-        const sourcePrefix = (log.source === myPrefix) ? 'player' : 'enemy';
-        const sourceSlot = document.querySelector(`#${sourcePrefix}-slots .slot[data-index="${log.slot}"] .card`);
-        
-        if (sourceSlot) {
-            sourceSlot.style.boxShadow = "0 0 15px red";
-            sourceSlot.style.transform = "scale(1.1)";
-            await new Promise(r => setTimeout(r, 500)); // 蓄力
-        }
-
-        // 2. 显示技能名
-        // 这里可以做一个飘字效果，简单起见用 console 或 alert
-        // console.log(`${log.source} uses ${log.skill}`);
-
-        // 3. 攻击效果 (所有目标)
-        const targetPrefix = (log.source === myPrefix) ? 'enemy' : 'player';
-        const targetContainer = document.getElementById(`${targetPrefix}-slots`);
-        
-        log.targets.forEach(targetIdx => {
-            const targetCard = targetContainer.querySelector(`.slot[data-index="${targetIdx}"] .card`);
-            if (targetCard) {
-                // 闪烁变红
-                targetCard.style.background = "#ffcccc";
-                // 飘字伤害
-                const dmg = document.createElement('div');
-                dmg.innerText = `-${log.damage}`;
-                dmg.style.position = 'absolute';
-                dmg.style.color = 'red';
-                dmg.style.fontSize = '20px';
-                dmg.style.fontWeight = 'bold';
-                dmg.style.top = '0';
-                targetCard.appendChild(dmg);
-            }
-        });
-
-        await new Promise(r => setTimeout(r, 800)); // 伤害展示时间
-
-        // 还原攻击者样式
-        if (sourceSlot) {
-            sourceSlot.style.boxShadow = "";
-            sourceSlot.style.transform = "";
-        }
-    }
-
-    isAnimating = false;
-    finishAnimation();
 }
 
 async function finishAnimation() {

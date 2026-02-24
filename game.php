@@ -61,15 +61,20 @@ if (!isset($_SESSION['table_id'])) {
         #announcement-modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:200; align-items:center; justify-content:center; pointer-events: none; }
         #announcement-text { font-size: 48px; font-weight: bold; color: gold; text-shadow: 0 0 10px black; text-align: center; }
         #quit-btn { position: absolute; top: 10px; right: 10px; background: #d32f2f; color: white; border: none; padding: 5px 10px; cursor: pointer; }
+        /* 引入动画样式 */
+        @import url('assets/css/animations.css');
     </style>
 </head>
 <body>
+
+    <!-- 动画层 -->
+    <div id="animation-layer"></div>
 
     <!-- 敌方区域 -->
     <div id="enemy-area">
         <div class="status-bar">
             <span>敌方: <span id="enemy-name">Waiting...</span></span>
-            <span>HP: <span id="enemy-hp">100</span> | 🛡️ <span id="enemy-shield">0</span> | 💰 <span id="enemy-gold">0</span></span>
+            <span><span id="enemy-buff"></span> HP: <span id="enemy-hp">100</span> | 🛡️ <span id="enemy-shield">0</span> | 💰 <span id="enemy-gold">0</span></span>
         </div>
         <!-- 敌方手牌 (背面) -->
         <div id="enemy-hand" style="display:flex; gap:5px; margin-bottom: 10px; opacity: 0.5;">
@@ -116,8 +121,7 @@ if (!isset($_SESSION['table_id'])) {
         </div>
 
         <div class="status-bar">
-            <span>我方: <span id="my-name"><?php echo $_SESSION['player_id']; ?></span></span>
-            <span>HP: <span id="my-hp">100</span> | 🛡️ <span id="my-shield">0</span> | 💰 <span id="my-gold">0</span></span>
+            <span>我方: <span id="my-name"><?php echo $_SESSION['player_id']; ?></span><span id="my-buff"></span> HP: <span id="my-hp">100</span> | 🛡️ <span id="my-shield">0</span> | 💰 <span id="my-gold">0</span></span>
         </div>
     </div>
 
@@ -138,6 +142,7 @@ if (!isset($_SESSION['table_id'])) {
     </div>
 
     <script src="assets/js/game.js"></script>
+    <script src="assets/js/animations.js"></script>
     <script>
         async function quitGame() {
             if (!confirm("确定要退出并结束本局游戏吗？")) return;

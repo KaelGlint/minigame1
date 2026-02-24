@@ -1,0 +1,53 @@
+/* 动画元素通用样式 */
+#animation-layer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9999;
+}
+
+/* 子弹样式 */
+.projectile {
+    position: absolute;
+    width: 4px;
+    height: 12px;
+    background: #ffd700;
+    border-radius: 2px;
+    box-shadow: 0 0 6px #ff8c00;
+    transform-origin: center center;
+    will-change: transform, left, top;
+    z-index: 9999;
+}
+
+/* 枪口火光 */
+.muzzle-flash {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    background: radial-gradient(circle, #fff 20%, #ffeb3b 50%, transparent 70%);
+    border-radius: 50%;
+    opacity: 0;
+    transform: scale(0.5);
+    animation: flashAnim 0.1s ease-out;
+    z-index: 9999;
+}
+
+@keyframes flashAnim {
+    0% { opacity: 1; transform: scale(1.5); }
+    100% { opacity: 0; transform: scale(0.5); }
+}
+
+/* 飘字动画优化 */
+.damage-text {
+    animation: floatUp 1s ease-out forwards;
+    text-shadow: 1px 1px 0 #000;
+    z-index: 9999;
+}
+
+@keyframes floatUp {
+    0% { opacity: 1; transform: translateY(0) scale(1); }
+    100% { opacity: 0; transform: translateY(-30px) scale(1.2); }
+}
